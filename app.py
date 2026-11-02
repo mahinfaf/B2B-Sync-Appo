@@ -1,125 +1,158 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.linear_model import LinearRegression
+import requests
+import os
 
-# Page Configuration
-st.set_page_config(page_title="Data Explorer & Predictor", layout="wide")
+st.set_page_config(page_title="CloudSync Pro Feedback Hub", layout="wide")
 
-# App Title & Overview
-st.title("📊 Data Explorer & Linear Regression Predictor")
-st.write("Explore dataset features, generate visualizations, and run predictions.")
+# Allowed labels for system validation
+ALLOWED_LABELS = [
+    "bug_technical",
+    "feature_request",
+    "billing_pricing",
+    "usability_ui",
+    "positive_feedback",
+    "needs_manual_review"
+]
 
-# ---------------------------------------------------------
-# Step 1: Load Data (Auto-load penguins.csv or Custom Upload)
-# ---------------------------------------------------------
-st.header("1. Dataset Preview")
+# Initialize Session State Database
+if "feedback_db" not in st.session_state:
+    st.session_state.feedback_db = pd.DataFrame(columns=["Rating", "Comment", "LLM_Label", "Manual_Review"])
 
-uploaded_file = st.file_uploader("Upload a custom CSV file (optional)", type=["csv"])
+def classify_feedback_with_groq(comment_text, rating):
+    """Calls Groq API to label SaaS customer feedback."""
+    groq_api_key = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY"))
+    
+    if not groq_api_key:
+        return "needs_manual_review"
 
-df = None
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {groq_api_key}",
+        "Content-Type": "application/json"
+    }
 
-# If user uploads a file, use it; otherwise, default to local penguins.csv
-if uploaded_file is not None:
-    df = pd.read_csv(uploaded_file)
-    st.success("Loaded uploaded CSV file.")
-else:
+    prompt = (
+        "You label customer feedback for CloudSync Pro, a B2B SaaS platform.\n"
+        "Categorize the comment into EXACTLY ONE of the following categories:\n"
+        "- bug_technical: System crashes, sync failures, software errors, or slow performance.\n"
+        "- feature_request: Requests for new features, missing tools, or third-party integrations.\n"
+        "- billing_pricing: Concerns about subscription plans, invoices, upgrades, or prices.\n"
+        "- usability_ui: Confusing interface layout, navigation friction, or design complaints.\n"
+        "- positive_feedback: General praise, satisfaction with reliability, or high utility.\n"
+        "- needs_manual_review: Urgent churn threats, sarcasm, ambiguous text, or edge cases.\n\n"
+        f"Customer Rating: {rating} Stars\n"
+        f"Customer Comment: {comment_text}\n"
+    )
+
+    payload = {
+        "model": "openai/gpt-oss-20b",
+        "temperature": 0,
+        "messages": [{"role": "user", "content": prompt}]
+    }
+
     try:
-        df = pd.read_csv("penguins.csv")
-        st.info("Loaded default dataset: `penguins.csv`")
-    except FileNotFoundError:
-        st.warning("`penguins.csv` not found in folder. Please upload a CSV file above.")
-
-if df is not None:
-    st.subheader("Data Preview")
-    st.dataframe(df.head(), use_container_width=True)
-
-    # Filter numeric columns
-    numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns.tolist()
-
-    if len(numeric_cols) < 3:
-        st.error("Please ensure the dataset contains at least 3 numeric columns.")
-    else:
-        # ---------------------------------------------------------
-        # Step 2: Visualization
-        # ---------------------------------------------------------
-        st.header("2. Data Visualization")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            chart_type = st.selectbox("Select Chart Type", ["Scatter", "Line", "Histogram"])
-            selected_col = st.selectbox("Select Primary Column (X-axis)", numeric_cols, index=0)
-        
-        with col2:
-            if chart_type in ["Scatter", "Line"]:
-                secondary_col = st.selectbox("Select Secondary Column (Y-axis)", numeric_cols, index=min(1, len(numeric_cols) - 1))
-
-        fig, ax = plt.subplots(figsize=(8, 4))
-        
-        if chart_type == "Histogram":
-            sns.histplot(df[selected_col].dropna(), kde=True, ax=ax, color="skyblue")
-            ax.set_title(f"Histogram of {selected_col}")
-        elif chart_type == "Line":
-            ax.plot(df[selected_col], label=selected_col)
-            if secondary_col:
-                ax.plot(df[secondary_col], label=secondary_col)
-            ax.legend()
-            ax.set_title(f"Line Chart of {selected_col} vs {secondary_col}")
-        elif chart_type == "Scatter":
-            sns.scatterplot(data=df, x=selected_col, y=secondary_col, ax=ax, color="teal")
-            ax.set_title(f"Scatter Plot: {selected_col} vs {secondary_col}")
-
-        st.pyplot(fig)
-
-        # ---------------------------------------------------------
-        # Step 3: Linear Regression Model
-        # ---------------------------------------------------------
-        st.header("3. Linear Regression Predictor")
-
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            feature1 = st.selectbox("Feature 1 (X1)", numeric_cols, index=0)
-        with c2:
-            feature2 = st.selectbox("Feature 2 (X2)", numeric_cols, index=1)
-        with c3:
-            target = st.selectbox("Target (Y)", numeric_cols, index=min(2, len(numeric_cols) - 1))
-
-        if feature1 == feature2 or feature1 == target or feature2 == target:
-            st.warning("Please select three distinct columns for Feature 1, Feature 2, and Target.")
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        if response.status_code == 200:
+            result = response.json()["choices"][0]["message"]["content"].strip().lower()
+            return result if result in ALLOWED_LABELS else "needs_manual_review"
         else:
-            # Clean missing values for training
-            clean_df = df[[feature1, feature2, target]].dropna()
+            return "needs_manual_review"
+    except Exception:
+        return "needs_manual_review"
 
-            X = clean_df[[feature1, feature2]]
-            y = clean_df[target]
+# ---------------------------------------------------------
+# Sidebar Navigation
+# ---------------------------------------------------------
+st.sidebar.title("CloudSync Portal")
+page = st.sidebar.radio("Navigation", ["Submit Customer Feedback", "Executive Owner Dashboard"])
 
-            model = LinearRegression()
-            model.fit(X, y)
+# ---------------------------------------------------------
+# Page 1: Customer Feedback Portal
+# ---------------------------------------------------------
+if page == "Submit Customer Feedback":
+    st.title("💻 CloudSync Pro User Feedback")
+    st.write("Help us improve CloudSync Pro. Leave a star rating, a comment, or both.")
 
-            st.subheader("Make Predictions")
-            val1 = st.number_input(f"Enter value for {feature1}:", value=float(clean_df[feature1].mean()))
-            val2 = st.number_input(f"Enter value for {feature2}:", value=float(clean_df[feature2].mean()))
+    with st.form("feedback_form"):
+        rating = st.slider("Satisfaction Rating (1 = Poor, 5 = Excellent)", min_value=1, max_value=5, value=5)
+        comment = st.text_area("Your Feedback / Feature Request / Issues", placeholder="Describe your experience with CloudSync Pro...")
+        submitted = st.form_submit_button("Submit Response")
 
-            if st.button("Predict Target"):
-                prediction = model.predict([[val1, val2]])
-                st.success(f"Predicted **{target}**: `{prediction[0]:.2f}`")
+    if submitted:
+        if not comment.strip() and rating is None:
+            st.error("Please provide at least a star rating or a written comment.")
+        else:
+            with st.spinner("Analyzing feedback..."):
+                if comment.strip():
+                    llm_label = classify_feedback_with_groq(comment.strip(), rating)
+                else:
+                    llm_label = "positive_feedback" if rating >= 4 else "needs_manual_review"
 
-        # ---------------------------------------------------------
-      # ---------------------------------------------------------
-        # Step 4: Dynamic Explanation Sentence
-        # ---------------------------------------------------------
+                # Flag mismatch rules (e.g., Low rating given with positive label)
+                needs_review = False
+                if llm_label == "needs_manual_review" or (rating <= 2 and llm_label == "positive_feedback"):
+                    needs_review = True
+                    llm_label = "needs_manual_review"
+
+                # Store result
+                new_entry = pd.DataFrame([{
+                    "Rating": rating,
+                    "Comment": comment if comment.strip() else "N/A (Rating only)",
+                    "LLM_Label": llm_label,
+                    "Manual_Review": needs_review
+                }])
+                st.session_state.feedback_db = pd.concat([st.session_state.feedback_db, new_entry], ignore_index=True)
+                st.success("Your response has been recorded and routed to product management!")
+
+# ---------------------------------------------------------
+# Page 2: Executive Dashboard
+# ---------------------------------------------------------
+elif page == "Executive Owner Dashboard":
+    st.title("📊 Product & Churn Intelligence Dashboard")
+    st.write("Categorized insights to track software health, churn risk, and critical issues.")
+
+    df = st.session_state.feedback_db
+
+    if df.empty:
+        st.info("No feedback entries available yet. Use the sidebar to submit test data.")
+    else:
+        # 1. Key Metrics
+        c1, c2, c3 = st.columns(3)
+        
+        total_feedback = len(df)
+        avg_rating = df["Rating"].mean()
+        manual_review_count = len(df[df["LLM_Label"] == "needs_manual_review"])
+
+        c1.metric("Total Submissions", total_feedback)
+        c2.metric("Average Rating", f"{avg_rating:.2f} ⭐")
+        c3.metric("Requires Manual Review", manual_review_count)
+
         st.markdown("---")
+
+        # 2. Charts
+        col_a, col_b = st.columns(2)
         
-        # Dynamic context framing based on source file
-        dataset_name = uploaded_file.name if uploaded_file is not None else "penguins.csv"
-        
-        dynamic_statement = (
-            f"**Model Usage & Risk (`{dataset_name}`):** This linear regression model estimates **{target}** "
-            f"using **{feature1}** and **{feature2}** as predictor inputs. "
-            f"When its predictions are wrong, decisions relying on estimated **{target}** "
-            f"(such as operational planning, resource allocation, or scientific classifications) "
-            f"risk financial loss, misallocated effort, or faulty domain conclusions."
-        )
-        
-        st.info(dynamic_statement)
+        with col_a:
+            st.subheader("Feedback Category Breakdown")
+            label_counts = df["LLM_Label"].value_counts()
+            st.bar_chart(label_counts)
+
+        with col_b:
+            st.subheader("Rating Distribution")
+            rating_counts = df["Rating"].value_counts().sort_index()
+            st.bar_chart(rating_counts)
+
+        st.markdown("---")
+
+        # 3. Manual Review Table
+        st.subheader("🚨 Accounts Needing Urgent Manual Review")
+        flagged_df = df[df["LLM_Label"] == "needs_manual_review"]
+
+        if flagged_df.empty:
+            st.success("No high-risk feedback currently flagged for manual intervention.")
+        else:
+            st.dataframe(
+                flagged_df[["Rating", "Comment", "LLM_Label"]], 
+                use_container_width=True
+            )
